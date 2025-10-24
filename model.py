@@ -93,16 +93,18 @@ class MLP(nn.Module):
 
 class Block(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, device:torch.device):
         super().__init__()
-        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = CausalSelfAttention(config)
-        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
-        self.mlp = MLP(config)
+        self.device = device
+        self.seq = nn.Sequential(
+            LayerNorm(config.n_embd, bias=config.bias),
+            CausalSelfAttention(config),
+            LayerNorm(config.n_embd, bias=config.bias),
+            MLP(config)
+        ).to(device=self.device)
 
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        x = self.seq(x.to(device=self.device))
         return x
 
 @dataclass
@@ -128,7 +130,7 @@ class GPT(nn.Module):
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config).to(device=torch.device(f'cuda:{self.gpuSpread[i]}')) for i in range(config.n_layer)]),
+            h = nn.ModuleList([Block(config,torch.device(f'cuda:{self.gpuSpread[i]}')) for i in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -169,7 +171,7 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
-        device = idx.device
+        device = idx
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
@@ -178,11 +180,9 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
-        i = 0
         for block in self.transformer.h:
-            x = block(x.to(device=torch.device(f'cuda:{self.gpuSpread[i]}')))
-            i += 1
-        x = self.transformer.ln_f(x)
+            x = block(x)
+        x = self.transformer.ln_f(x.to(device=self.transformer.ln_f.weight.device))
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss

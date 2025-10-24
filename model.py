@@ -91,11 +91,11 @@ class MLP(nn.Module):
         x = self.dropout(x)
         return x
 
-class Block(nn.Module, targetDevice):
+class Block(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, targetDevice):
         super().__init__()
-        self.seq(
+        self.seq = nn.Sequential(
             LayerNorm(config.n_embd, bias=config.bias),
             CausalSelfAttention(config),
             LayerNorm(config.n_embd, bias=config.bias),
@@ -113,7 +113,7 @@ class GPTConfig:
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
-    n_gpu: int = 2
+    n_gpus: int = 2
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 

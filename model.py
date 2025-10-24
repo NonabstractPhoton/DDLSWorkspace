@@ -93,19 +93,16 @@ class MLP(nn.Module):
 
 class Block(nn.Module):
 
-    def __init__(self, config, targetDevice):
+    def __init__(self, config):
         super().__init__()
-        self.targetDevice = targetDevice
-        self.seq = nn.Sequential(
-            LayerNorm(config.n_embd, bias=config.bias),
-            CausalSelfAttention(config),
-            LayerNorm(config.n_embd, bias=config.bias),
-            MLP(config)
-        )
-        # leave device placement to the caller to avoid partial/mixed moves when parameters are shared
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.attn = CausalSelfAttention(config)
+        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.mlp = MLP(config)
 
     def forward(self, x):
-        x = self.seq(x.to(device=self.targetDevice))
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
         return x
 
 @dataclass
@@ -126,41 +123,22 @@ class GPT(nn.Module):
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
-
-        gpuSpread = list(map(lambda i: int(i*config.n_gpus/config.n_layer),range(config.n_layer)))
-        
+        self.gpuSpread = list(map(lambda i: int(i*config.n_gpus/config.n_layer), range(config.n_layer)))
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config, torch.device(f"cuda:{gpuSpread[i]}")) for i in range(config.n_layer)]),
+            h = nn.ModuleList([Block(config).to(device=torch.device(f'cuda:{self.gpuSpread[i]}')) for i in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        # with weight tying when using torch.compile() some warnings get generated:
+        # "UserWarning: functional_call was passed multiple values for tied weights.
+        # This behavior is deprecated and will be an error in future versions"
+        # not 100% sure what this is, so far seems to be harmless. TODO investigate
+        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
 
-        # move each Block to its assigned device in one place (avoids partial moves during construction)
-        for i, block in enumerate(self.transformer.h):
-            tgt = torch.device(f"cuda:{gpuSpread[i]}")
-            block.to(device=tgt)
-
-        # choose devices for shared modules:
-        first_device = torch.device(f"cuda:{gpuSpread[0]}")
-        last_device = torch.device(f"cuda:{gpuSpread[-1]}")
-
-        # place embeddings on the first device (where input is expected) and ln_f/lm_head on the final device
-        self.transformer.wte.to(device=first_device)
-        self.transformer.wpe.to(device=first_device)
-        self.transformer.ln_f.to(device=last_device)
-
-        # move lm_head to final device and conditionally tie weights only if devices match
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False).to(device=last_device)
-        # tie weights only if on same device; otherwise skip tying to avoid cross-device Parameter issues
-        if self.transformer.wte.weight.device == self.lm_head.weight.device:
-            self.transformer.wte.weight = self.lm_head.weight
-        else:
-            print(f"Warning: skipping weight tying because wte is on {self.transformer.wte.weight.device} "
-                  f"and lm_head is on {self.lm_head.weight.device}")
-
-        # init all weights after modules are on their final devices
+        # init all weights
         self.apply(self._init_weights)
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():
@@ -200,10 +178,11 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
+        i = 0
         for block in self.transformer.h:
-            x = block(x)
-        x = x.to(device=device)
-        x = self.transformer.ln_f(x)
+            x = block(x.to(device=torch.device(f'cuda:{self.gpuSpread[i]}')))
+            i += 1
+        x = self.transformer.ln_f(x.to(self.transformer.ln_f.weight.device))
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss

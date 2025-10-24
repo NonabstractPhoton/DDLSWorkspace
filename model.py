@@ -95,16 +95,15 @@ class Block(nn.Module):
 
     def __init__(self, config, device):
         super().__init__()
-        self.device = device
         self.seq = nn.Sequential(
             LayerNorm(config.n_embd, bias=config.bias),
             CausalSelfAttention(config),
             LayerNorm(config.n_embd, bias=config.bias),
             MLP(config)
-        ).to(self.device)
+        ).to(device)
 
     def forward(self, x):
-        x = self.seq(x.to(self.device))
+        x = self.seq(x.to(self.seq[0].weight.device))
         return x
 
 @dataclass

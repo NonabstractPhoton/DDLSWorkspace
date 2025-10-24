@@ -100,10 +100,10 @@ class Block(nn.Module, targetDevice):
             CausalSelfAttention(config),
             LayerNorm(config.n_embd, bias=config.bias),
             MLP(config)
-        ).to(targetDevice)
+        ).to(device=targetDevice)
 
     def forward(self, x):
-        x = self.seq(x.to(targetDevice))
+        x = self.seq(x.to(device=targetDevice))
         return x
 
 @dataclass
@@ -183,7 +183,7 @@ class GPT(nn.Module):
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
             x = block(x)
-        x = x.to(device);
+        x = x.to(device=device);
         assert (self.transformer.ln_f.weight.device == device)
         x = self.transformer.ln_f(x)
 

@@ -101,7 +101,8 @@ class Block(nn.Module):
             CausalSelfAttention(config),
             LayerNorm(config.n_embd, bias=config.bias),
             MLP(config)
-        ).to(device=targetDevice)
+        )
+        # leave device placement to the caller to avoid partial/mixed moves when parameters are shared
 
     def forward(self, x):
         x = self.seq(x.to(device=self.targetDevice))
@@ -135,14 +136,31 @@ class GPT(nn.Module):
             h = nn.ModuleList([Block(config, torch.device(f"cuda:{gpuSpread[i]}")) for i in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # with weight tying when using torch.compile() some warnings get generated:
-        # "UserWarning: functional_call was passed multiple values for tied weights.
-        # This behavior is deprecated and will be an error in future versions"
-        # not 100% sure what this is, so far seems to be harmless. TODO investigate
-        self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
 
-        # init all weights
+        # move each Block to its assigned device in one place (avoids partial moves during construction)
+        for i, block in enumerate(self.transformer.h):
+            tgt = torch.device(f"cuda:{gpuSpread[i]}")
+            block.to(device=tgt)
+
+        # choose devices for shared modules:
+        first_device = torch.device(f"cuda:{gpuSpread[0]}")
+        last_device = torch.device(f"cuda:{gpuSpread[-1]}")
+
+        # place embeddings on the first device (where input is expected) and ln_f/lm_head on the final device
+        self.transformer.wte.to(device=first_device)
+        self.transformer.wpe.to(device=first_device)
+        self.transformer.ln_f.to(device=last_device)
+
+        # move lm_head to final device and conditionally tie weights only if devices match
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False).to(device=last_device)
+        # tie weights only if on same device; otherwise skip tying to avoid cross-device Parameter issues
+        if self.transformer.wte.weight.device == self.lm_head.weight.device:
+            self.transformer.wte.weight = self.lm_head.weight
+        else:
+            print(f"Warning: skipping weight tying because wte is on {self.transformer.wte.weight.device} "
+                  f"and lm_head is on {self.lm_head.weight.device}")
+
+        # init all weights after modules are on their final devices
         self.apply(self._init_weights)
         # apply special scaled init to the residual projections, per GPT-2 paper
         for pn, p in self.named_parameters():

@@ -127,15 +127,15 @@ class GPT(nn.Module):
         self.config = config
 
         gpuSpread = list(map(lambda i: int(i*config.n_gpus/config.n_layer),range(config.n_layer)))
-        gpu0 = torch.device(f"cuda:0")
+        
         self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd).to(device=gpu0),
-            wpe = nn.Embedding(config.block_size, config.n_embd).to(device=gpu0),
-            drop = nn.Dropout(config.dropout).to(device=gpu0),
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config, torch.device(f"cuda:{gpuSpread[i]}")) for i in range(config.n_layer)]),
-            ln_f = LayerNorm(config.n_embd, bias=config.bias).to(device=gpu0),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False).to(device=gpu0)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
@@ -177,7 +177,6 @@ class GPT(nn.Module):
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
-        assert(device == torch.device("cuda:0"))
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
@@ -185,8 +184,7 @@ class GPT(nn.Module):
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
             x = block(x)
-        x = x.to(device=device);
-        assert (self.transformer.ln_f.weight.device == device)
+        x = x.to(device=device)
         x = self.transformer.ln_f(x)
 
         if targets is not None:

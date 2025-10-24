@@ -93,18 +93,16 @@ class MLP(nn.Module):
 
 class Block(nn.Module):
 
-    def __init__(self, config, targetDevice):
+    def __init__(self, config):
         super().__init__()
-        self.targetDevice = targetDevice
-        self.seq = nn.Sequential(
-            LayerNorm(config.n_embd, bias=config.bias),
-            CausalSelfAttention(config),
-            LayerNorm(config.n_embd, bias=config.bias),
-            MLP(config)
-        ).to(device=self.targetDevice)
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.attn = CausalSelfAttention(config)
+        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.mlp = MLP(config)
 
     def forward(self, x):
-        x = self.seq(x.to(device=self.targetDevice))
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
         return x
 
 @dataclass
@@ -114,7 +112,6 @@ class GPTConfig:
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
-    n_gpus: int = 1
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
@@ -125,12 +122,12 @@ class GPT(nn.Module):
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
-        gpuSpread = list(map(lambda i: int(i*config.n_gpus/config.n_layer), range(config.n_layer)))
+
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config, torch.device(f'cuda:{gpuSpread[i]}')) for i in gpuSpread]),
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
@@ -182,8 +179,7 @@ class GPT(nn.Module):
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
             x = block(x)
-
-        x = self.transformer.ln_f(x.to(device=self.transformer.ln_f.weight.device))
+        x = self.transformer.ln_f(x)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss

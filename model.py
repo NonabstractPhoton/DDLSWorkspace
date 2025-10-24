@@ -95,6 +95,7 @@ class Block(nn.Module):
 
     def __init__(self, config, targetDevice):
         super().__init__()
+        self.targetDevice = targetDevice
         self.seq = nn.Sequential(
             LayerNorm(config.n_embd, bias=config.bias),
             CausalSelfAttention(config),
@@ -103,7 +104,7 @@ class Block(nn.Module):
         ).to(device=targetDevice)
 
     def forward(self, x):
-        x = self.seq(x.to(device=targetDevice))
+        x = self.seq(x.to(device=self.targetDevice))
         return x
 
 @dataclass

@@ -125,13 +125,13 @@ class GPT(nn.Module):
         self.config = config
         self.gpuSpread = list(map(lambda i: int(i*config.n_gpus/config.n_layer), range(config.n_layer)))
         self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
-            drop = nn.Dropout(config.dropout),
+            wte = nn.Embedding(config.vocab_size, config.n_embd).to(device=torch.device('cuda:0')),
+            wpe = nn.Embedding(config.block_size, config.n_embd).to(device=torch.device('cuda:0')),
+            drop = nn.Dropout(config.dropout).to(device=torch.device('cuda:0')),
             h = nn.ModuleList([Block(config).to(device=torch.device(f'cuda:{self.gpuSpread[i]}')) for i in range(config.n_layer)]),
-            ln_f = LayerNorm(config.n_embd, bias=config.bias),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias).to(device=torch.device('cuda:0')),
         ))
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False).to('cuda:0')
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
@@ -169,20 +169,20 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
-        device = idx.device
+        
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
+        pos = torch.arange(0, t, dtype=torch.long, device=torch.device('cuda:0')) # shape (t)
 
         # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx).to(device=torch.device('cuda:0')) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos).to(device=torch.device('cuda:0')) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         i = 0
         for block in self.transformer.h:
             x = block(x.to(device=torch.device(f'cuda:{self.gpuSpread[i]}')))
             i += 1
-        x = self.transformer.ln_f(x.to(device=device))
+        x = self.transformer.ln_f(x.to(device=torch.device('cuda:0')))
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss

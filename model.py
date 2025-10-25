@@ -106,6 +106,9 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln_2(x))
         return x
 
+# 
+#   Modifications Begin Here
+#
 @dataclass
 class GPTConfig:
     block_size: int = 1024
@@ -119,8 +122,25 @@ class GPTConfig:
 
 def createBlockModules(config, gpuDistribution):
     return nn.ModuleList([Block(config).to(device=torch.device('cuda',gpu_ord % 4)) for gpu_ord in gpuDistribution])
-def forwardSelectedBlockOn(list_rref, x, index, gpu_ord):
-    return list_rref.to_here()[index](x.to_here().to(device=torch.device('cuda',gpu_ord % 4)))
+
+def forwardBlocks(list_rref, x, gpuDistribution):
+    j = 0
+    for block in list_rref.to_here(): # to resolve type, the list should already be on the correct worker
+        x = block(x.to(device=torch.device('cuda',gpuDistribution[j])))
+        j += 1
+    return x
+
+def _parameter_rrefs(module):
+    param_rrefs = []
+    for param in module.parameters():
+        param_rrefs.append(RRef(param))
+    return param_rrefs
+
+def _param_refs_from_list(list_rref):
+    param_rrefs = []
+    for module in list_rref.to_here(): # to resolve type, the list should already be on the correct worker
+        param_rrefs.extend(_parameter_rrefs(module))
+    return param_rrefs
 
 class GPT(nn.Module):
 
@@ -157,6 +177,20 @@ class GPT(nn.Module):
         # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
 
+    def parameter_rrefs(self):
+        param_rrefs = []
+        param_rrefs.extend(_parameter_rrefs(self.transformer.wte))
+        param_rrefs.extend(_parameter_rrefs(self.transformer.wpe))
+        param_rrefs.extend(_parameter_rrefs(self.transformer.drop))
+        for block in self.transformer.hLocal:
+            param_rrefs.extend(_parameter_rrefs(block))
+        
+        param_rrefs.extend(rpc.rpc_sync(ps, _param_refs_from_list, args=(self.transformer.hRemote,)))
+        param_rrefs.extend(_parameter_rrefs(self.transformer.ln_f))
+        param_rrefs.extend(_parameter_rrefs(self.lm_head))
+
+        return param_rrefs
+
     def get_num_params(self, non_embedding=True):
         """
         Return the number of parameters in the model.
@@ -191,12 +225,7 @@ class GPT(nn.Module):
         for block in self.transformer.hLocal:
             x = block(x.to(device=torch.device('cuda',self.gpuSpread[i])))
             i += 1
-        x_rref = Rref(x)
-        for j in range(i, self.config.n_layer):
-            x_rref = rpc.remote(ps,forwardSelectedBlockOn, args=(self.transformer.hRemote, x_rref, j, self.gpuSpread[j]))
-            j += 1
-        
-        x = x_rref.to_here()
+        x = rpc.rpc_sync(ps, forwardBlocks, args=(self.transformer.hRemote, x, self.gpuSpread[i:]))
 
         x = self.transformer.ln_f(x.to(device=torch.device('cuda:0')))
 

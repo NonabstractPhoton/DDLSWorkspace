@@ -181,7 +181,7 @@ def run_trainer(rank, world_size):
     '''
 
     optimizer = DistributedOptimizer(
-        optim.AdamW,
+        torch.optim.AdamW,
         model.parameter_rrefs()
     )
 

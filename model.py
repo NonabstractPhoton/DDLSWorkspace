@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
+import torch.distributed.rpc as rpc
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -116,19 +117,27 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
+def createBlockModules(config, gpuDistribution):
+    return nn.ModuleList([Block(config).to(device=torch.device('cuda',gpu_ord % 4)) for gpu_ord in gpuDistribution])
+def forwardSelectedBlockOn(list_rref, x, index, gpu_ord):
+    return list_rref.to_here()[index](x.to_here().to(device=torch.device('cuda',gpu_ord % 4)))
+
 class GPT(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, ps):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
         self.gpuSpread = list(map(lambda i: int(i*config.n_gpus/config.n_layer), range(config.n_layer)))
+        local_end = 4*config.n_layer//config.n_gpus
+
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd).to(device=torch.device('cuda:0')),
             wpe = nn.Embedding(config.block_size, config.n_embd).to(device=torch.device('cuda:0')),
             drop = nn.Dropout(config.dropout).to(device=torch.device('cuda:0')),
-            h = nn.ModuleList([Block(config).to(device=torch.device(f'cuda:{self.gpuSpread[i]}')) for i in range(config.n_layer)]),
+            hLocal = createBlockModules(config, self.gpuSpread[0:local_end]),
+            hRemote = rpc.remote(ps, createBlockModules, args=(config, self.gpuSpread[local_end:])),   #Rref to ModuleList
             ln_f = LayerNorm(config.n_embd, bias=config.bias).to(device=torch.device('cuda:0')),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False).to('cuda:0')
@@ -179,9 +188,16 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(pos).to(device=torch.device('cuda:0')) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         i = 0
-        for block in self.transformer.h:
-            x = block(x.to(device=torch.device(f'cuda:{self.gpuSpread[i]}')))
+        for block in self.transformer.hLocal:
+            x = block(x.to(device=torch.device('cuda',self.gpuSpread[i])))
             i += 1
+        x_rref = Rref(x)
+        for j in range(i, self.config.n_layer):
+            x_rref = rpc.remote(ps,forwardSelectedBlockOn, args=(self.transformer.hRemote, x_rref, j, self.gpuSpread[j]))
+            j += 1
+        
+        x = x_rref.to_here()
+
         x = self.transformer.ln_f(x.to(device=torch.device('cuda:0')))
 
         if targets is not None:

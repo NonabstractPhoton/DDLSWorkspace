@@ -200,7 +200,7 @@ def run_trainer(rank, world_size):
             losses = torch.zeros(eval_iters)
             for k in range(eval_iters):
                 X, Y = get_batch(split)
-                with ctx:
+                with dist_autograd.context() as context_id::
                     logits, loss = model(X, Y)
                 losses[k] = loss.item()
             out[split] = losses.mean()
@@ -276,21 +276,21 @@ def run_trainer(rank, world_size):
 
         # forward backward update, with optional gradient accumulation to simulate larger batch size
         # and using the GradScaler if data type is float16
-        for micro_step in range(gradient_accumulation_steps):
-            with ctx:
-                logits, loss = model(X, Y)
-                loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+        
+        with dist_autograd.context() as context_id::
+            logits, loss = model(X, Y)
+            loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
             # immediately async prefetch next batch while model is doing the forward pass on the GPU
             X, Y = get_batch('train')
             # backward pass, with gradient scaling if training in fp16
             scaler.scale(loss).backward()
-        # clip the gradient
-        if grad_clip != 0.0:
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-        # step the optimizer and scaler if training in fp16
-        scaler.step(optimizer)
-        scaler.update()
+            # clip the gradient
+            if grad_clip != 0.0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            # step the optimizer and scaler if training in fp16
+            scaler.step(optimizer)
+            scaler.update()
         # flush the gradients as soon as we can, no need for this memory anymore
         # unecessary with distributed optimizer
         # optimizer.zero_grad(set_to_none=True)

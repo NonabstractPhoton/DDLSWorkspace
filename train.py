@@ -179,7 +179,11 @@ def run_trainer(rank, world_size):
 
     optimizer = DistributedOptimizer(
         torch.optim.AdamW,
-        model.parameter_rrefs()
+        model.parameter_rrefs(),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+        betas=(beta1, beta2),
+        )
     )
 
     # compile the model
@@ -221,7 +225,8 @@ def run_trainer(rank, world_size):
         return min_lr + coeff * (learning_rate - min_lr)
     '''
     # direct access isnt possible with distriubted optimizer 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=lr_decay_iters, eta_min=min_lr)
+    # nor is a scheduler because rpc features are beta and not a priority
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=lr_decay_iters, eta_min=min_lr)
     # logging
     if wandb_log and master_process:
         import wandb
@@ -287,7 +292,6 @@ def run_trainer(rank, world_size):
         # step the optimizer and scaler if training in fp16
         scaler.step(optimizer)
         scaler.update()
-        scheduler.step()
         # flush the gradients as soon as we can, no need for this memory anymore
         # unecessary with distributed optimizer
         # optimizer.zero_grad(set_to_none=True)

@@ -123,12 +123,12 @@ class GPTConfig:
 def createBlockModules(config, gpuDistribution):
     return nn.ModuleList([Block(config).to(device=torch.device('cuda',gpu_ord % 4)) for gpu_ord in gpuDistribution])
 
-def forwardBlocks(list_rref, x, gpuDistribution):
+def forwardRemoteBlocks(list_rref, x, gpuDistribution):
     j = 0
     for block in list_rref.to_here(): # to resolve type, the list should already be on the correct worker
         x = block(x.to(device=torch.device('cuda',gpuDistribution[j])))
         j += 1
-    return x
+    return x.to(device=torch.device('cpu')) # rpc backend on supports cpu tensor transfer
 
 def _parameter_rrefs(module):
     param_rrefs = []
@@ -226,7 +226,7 @@ class GPT(nn.Module):
         for block in self.transformer.hLocal:
             x = block(x.to(device=torch.device('cuda',self.gpuSpread[i])))
             i += 1
-        x = rpc.rpc_sync(self.ps, forwardBlocks, args=(self.hRemote, x, self.gpuSpread[i:]))
+        x = rpc.rpc_sync(self.ps, forwardRemoteBlocks, args=(self.hRemote, x, self.gpuSpread[i:]))
 
         x = self.transformer.ln_f(x.to(device=torch.device('cuda:0')))
 

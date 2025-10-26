@@ -205,7 +205,9 @@ def run_trainer(rank, world_size):
         return out
 
     # learning rate decay scheduler (cosine with warmup)
-    def get_lr(it):
+    '''
+    def get_lr(epoch):
+        it = epoch
         # 1) linear warmup for warmup_iters steps
         if it < warmup_iters:
             return learning_rate * (it + 1) / (warmup_iters + 1)
@@ -217,7 +219,9 @@ def run_trainer(rank, world_size):
         assert 0 <= decay_ratio <= 1
         coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
         return min_lr + coeff * (learning_rate - min_lr)
-
+    '''
+    # direct access isnt possible with distriubted optimizer 
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=lr_decay_iters, eta_min=min_lr)
     # logging
     if wandb_log and master_process:
         import wandb
@@ -232,9 +236,11 @@ def run_trainer(rank, world_size):
     while True:
 
         # determine and set the learning rate for this iteration
+        '''
         lr = get_lr(iter_num) if decay_lr else learning_rate
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
+        '''
 
         # evaluate the loss on train/val sets and write checkpoints
         if iter_num % eval_interval == 0 and master_process:
@@ -281,6 +287,7 @@ def run_trainer(rank, world_size):
         # step the optimizer and scaler if training in fp16
         scaler.step(optimizer)
         scaler.update()
+        scheduler.step()
         # flush the gradients as soon as we can, no need for this memory anymore
         # unecessary with distributed optimizer
         # optimizer.zero_grad(set_to_none=True)

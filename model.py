@@ -152,6 +152,7 @@ class GPT(nn.Module):
         self.gpuSpread = list(map(lambda i: int(i*config.n_gpus/config.n_layer), range(config.n_layer)))
         local_end = 4*config.n_layer//config.n_gpus
         self.ps = ps
+        self.hasRemote = (local_end < config.n_layer)
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd).to(device=torch.device('cuda:0')),
@@ -160,7 +161,11 @@ class GPT(nn.Module):
             hLocal = createBlockModules(config, self.gpuSpread[0:local_end]),#Rref to ModuleList
             ln_f = LayerNorm(config.n_embd, bias=config.bias).to(device=torch.device('cuda:0')),
         ))
-        self.hRemote = rpc.remote(self.ps, createBlockModules, args=(config, self.gpuSpread[local_end:]))   #Rref to ModuleList
+        if (self.hasRemote):
+            self.hRemote = rpc.remote(self.ps, createBlockModules, args=(config, self.gpuSpread[local_end:]))   #Rref to ModuleList
+        else:
+            self.hRemote = None
+
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False).to('cuda:0')
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
@@ -186,7 +191,8 @@ class GPT(nn.Module):
         for block in self.transformer.hLocal:
             param_rrefs.extend(_parameter_rrefs(block))
 
-        param_rrefs.extend(rpc.rpc_sync(self.ps, _param_refs_from_list, args=(self.hRemote,)))
+        if (self.hasRemote):
+            param_rrefs.extend(rpc.rpc_sync(self.ps, _param_refs_from_list, args=(self.hRemote,)))
         param_rrefs.extend(_parameter_rrefs(self.transformer.ln_f))
         param_rrefs.extend(_parameter_rrefs(self.lm_head))
 
@@ -227,7 +233,8 @@ class GPT(nn.Module):
             x = block(x.to(device=torch.device('cuda',self.gpuSpread[i])))
             i += 1
         # send to remote node with tensor moved to CPU for rpc transfer
-        x = rpc.rpc_sync(self.ps, forwardRemoteBlocks, args=(self.hRemote, x.to(device=torch.device('cpu')), self.gpuSpread[i:]))
+        if (self.hasRemote):
+            x = rpc.rpc_sync(self.ps, forwardRemoteBlocks, args=(self.hRemote, x.to(device=torch.device('cpu')), self.gpuSpread[i:]))
 
         x = self.transformer.ln_f(x.to(device=torch.device('cuda:0')))
 

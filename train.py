@@ -13,7 +13,7 @@ import torch.distributed.rpc as rpc
 from torch.distributed.optim import DistributedOptimizer
 
 from model import GPTConfig, GPT
-    
+
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
@@ -59,6 +59,10 @@ compile = True # use PyTorch 2.0 to compile the model to be faster
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
+
+
+if __name__ == '__main__':
+    main()
 # -----------------------------------------------------------------------------$
 def run_worker(rank, world_size):
     if rank == 1:
@@ -71,12 +75,6 @@ def run_worker(rank, world_size):
 
     # block until all rpcs finish
     rpc.shutdown()
-
-# Begin Main function
-rank = int(os.environ['RANK'])
-world_size = int(os.environ['WORLD_SIZE'])
-print(rank, world_size)
-run_worker(rank, world_size)
 # -----------------------------------------------------------------------------
 
 def run_trainer(rank, world_size):
@@ -308,3 +306,9 @@ def run_trainer(rank, world_size):
         # termination conditions
         if iter_num > max_iters:
             break
+
+def main():
+    rank = int(os.environ['GROUP_RANK'])
+    world_size = int(os.environ['WORLD_SIZE'])
+    print(f"Rank: {rank}, World Size: {world_size}")
+    run_worker(rank, world_size)

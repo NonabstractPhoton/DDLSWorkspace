@@ -138,7 +138,7 @@ def _parameter_rrefs(module):
 
 def _param_refs_from_list(list_rref):
     param_rrefs = []
-    for module in list_rref.to_here(): # to resolve type, the list should already be on the correct worker
+    for module in list_rref.to_here() if list_rref.hasattr('to_here') else list_rref: # to resolve type, the list should already be on the correct worker
         param_rrefs.extend(_parameter_rrefs(module))
     return param_rrefs
 
@@ -186,7 +186,7 @@ class GPT(nn.Module):
         for block in self.transformer.hLocal:
             param_rrefs.extend(_parameter_rrefs(block))
 
-        param_rrefs.extend(rpc.rpc_sync(self.ps, _param_refs_from_list, args=(self.hRemote)))
+        param_rrefs.extend(rpc.rpc_sync(self.ps, _param_refs_from_list, args=(self.hRemote,)))
         param_rrefs.extend(_parameter_rrefs(self.transformer.ln_f))
         param_rrefs.extend(_parameter_rrefs(self.lm_head))
 

@@ -156,10 +156,10 @@ class GPT(nn.Module):
             wte = nn.Embedding(config.vocab_size, config.n_embd).to(device=torch.device('cuda:0')),
             wpe = nn.Embedding(config.block_size, config.n_embd).to(device=torch.device('cuda:0')),
             drop = nn.Dropout(config.dropout).to(device=torch.device('cuda:0')),
-            hLocal = createBlockModules(config, self.gpuSpread[0:local_end]),
-            hRemote = rpc.remote(ps, createBlockModules, args=(config, self.gpuSpread[local_end:])),   #Rref to ModuleList
+            hLocal = createBlockModules(config, self.gpuSpread[0:local_end]),#Rref to ModuleList
             ln_f = LayerNorm(config.n_embd, bias=config.bias).to(device=torch.device('cuda:0')),
         ))
+        self.hRemote = rpc.remote(ps, createBlockModules, args=(config, self.gpuSpread[local_end:])),   #Rref to ModuleList
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False).to('cuda:0')
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
@@ -185,7 +185,7 @@ class GPT(nn.Module):
         for block in self.transformer.hLocal:
             param_rrefs.extend(_parameter_rrefs(block))
         
-        param_rrefs.extend(rpc.rpc_sync(ps, _param_refs_from_list, args=(self.transformer.hRemote,)))
+        param_rrefs.extend(rpc.rpc_sync(ps, _param_refs_from_list, args=(self.hRemote,)))
         param_rrefs.extend(_parameter_rrefs(self.transformer.ln_f))
         param_rrefs.extend(_parameter_rrefs(self.lm_head))
 
@@ -225,7 +225,7 @@ class GPT(nn.Module):
         for block in self.transformer.hLocal:
             x = block(x.to(device=torch.device('cuda',self.gpuSpread[i])))
             i += 1
-        x = rpc.rpc_sync(ps, forwardBlocks, args=(self.transformer.hRemote, x, self.gpuSpread[i:]))
+        x = rpc.rpc_sync(ps, forwardBlocks, args=(self.hRemote, x, self.gpuSpread[i:]))
 
         x = self.transformer.ln_f(x.to(device=torch.device('cuda:0')))
 

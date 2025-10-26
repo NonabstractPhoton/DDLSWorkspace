@@ -320,7 +320,7 @@ def run_trainer(rank, world_size):
 # -----------------------------------------------------------------------------
 # Main Function
 
-rank = 0
+rank = 1
 world_size = 1
 try :
     rank = int(os.environ['RANK'])

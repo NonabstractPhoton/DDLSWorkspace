@@ -8,9 +8,9 @@ import numpy as np
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
+import torch.multiprocessing as mp
 
 from model import GPTConfig, GPT
-from optim import DistributedOptimizer
     
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -60,8 +60,8 @@ config = {k: globals()[k] for k in config_keys} # will be useful for logging
 # -----------------------------------------------------------------------------$
 def run_worker(rank, world_size):
     if rank == 1:
-        rpc.init_rpc("trainer", rank=rank, world_size=world_size)
-        run_trainer()
+    rpc.init_rpc("trainer", rank=rank, world_size=world_size)
+    run_trainer()
     else:
         rpc.init_rpc("ps", rank=rank, world_size=world_size)
         # parameter server do nothing
@@ -71,10 +71,10 @@ def run_worker(rank, world_size):
     rpc.shutdown()
 
 # Begin Main function
-
-world_size = int(1 + config.n_gpus / 4) # node count
-mp.spawn(run_worker, args=(world_size, ), nprocs=world_size, join=True)
-
+rank = int(os.environ['RANK'])
+world_size = int(os.environ['WORLD_SIZE'])
+print(rank, world_size)
+run_worker(rank, world_size)
 # -----------------------------------------------------------------------------
 
 def run_trainer(rank, world_size):
@@ -137,7 +137,7 @@ def run_trainer(rank, world_size):
             print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
         model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
         gptconf = GPTConfig(**model_args)
-        model = GPT(gptconf)
+        model = GPT(gptconf,'ps')
     elif init_from == 'resume':
         print(f"Resuming training from {out_dir}")
         # resume training from a checkpoint.

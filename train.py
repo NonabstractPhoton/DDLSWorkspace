@@ -64,7 +64,7 @@ config = {k: globals()[k] for k in config_keys} # will be useful for logging
 def run_worker(rank, world_size):
     if rank == 1:
         rpc.init_rpc("trainer", rank=rank, world_size=world_size)
-        run_trainer()
+        run_trainer(rank, world_size)
     else:
         rpc.init_rpc("ps", rank=rank, world_size=world_size)
         # parameter server do nothing

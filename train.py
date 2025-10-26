@@ -184,7 +184,6 @@ def run_trainer(rank, world_size):
         weight_decay=weight_decay,
         betas=(beta1, beta2),
         )
-    )
 
     # compile the model
     if compile:

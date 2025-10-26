@@ -77,7 +77,7 @@ def run_worker(rank, world_size):
 
 def run_trainer(rank, world_size):
     # various inits, derived attributes, I/O setup
-    master_process = rank == 0
+    master_process = rank == 1
     seed_offset = 0
     tokens_per_iter = gradient_accumulation_steps * batch_size * block_size
     print(f"tokens per iteration will be: {tokens_per_iter:,}")
@@ -228,9 +228,9 @@ def run_trainer(rank, world_size):
     # nor is a scheduler because rpc features are beta and not a priority
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=lr_decay_iters, eta_min=min_lr)
     # logging
-    
-    import wandb
-    wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+    if wandb_log and master_process:
+        import wandb
+        wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
     # training loop
     X, Y = get_batch('train') # fetch the very first batch
@@ -248,7 +248,7 @@ def run_trainer(rank, world_size):
         '''
 
         # evaluate the loss on train/val sets and write checkpoints
-        if iter_num % eval_interval == 0 and master_process:
+        if iter_num % eval_interval == 0:
             losses = estimate_loss()
             print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
             if wandb_log:
@@ -300,7 +300,7 @@ def run_trainer(rank, world_size):
         t1 = time.time()
         dt = t1 - t0
         t0 = t1
-        if iter_num % log_interval == 0 and master_process:
+        if iter_num % log_interval == 0:
             # get loss as float. note: this is a CPU-GPU sync point
             # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
             lossf = loss.item() * gradient_accumulation_steps

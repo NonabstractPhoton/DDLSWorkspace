@@ -11,6 +11,7 @@ from torch.distributed import init_process_group, destroy_process_group
 import torch.multiprocessing as mp
 import torch.distributed.rpc as rpc
 from torch.distributed.optim import DistributedOptimizer
+import torch.distributed.autograd as dist_autograd
 
 from model import GPTConfig, GPT
 

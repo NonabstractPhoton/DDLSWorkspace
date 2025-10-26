@@ -160,7 +160,7 @@ class GPT(nn.Module):
             hLocal = createBlockModules(config, self.gpuSpread[0:local_end]),#Rref to ModuleList
             ln_f = LayerNorm(config.n_embd, bias=config.bias).to(device=torch.device('cuda:0')),
         ))
-        self.hRemote = rpc.remote(self.ps, createBlockModules, args=(config, self.gpuSpread[local_end:])),   #Rref to ModuleList
+        self.hRemote = rpc.remote(self.ps, createBlockModules, args=(config, self.gpuSpread[local_end:]))   #Rref to ModuleList
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False).to('cuda:0')
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
@@ -186,7 +186,7 @@ class GPT(nn.Module):
         for block in self.transformer.hLocal:
             param_rrefs.extend(_parameter_rrefs(block))
 
-        param_rrefs.extend(rpc.rpc_sync(self.ps, _param_refs_from_list, args=(self.hRemote,)))
+        param_rrefs.extend(rpc.rpc_sync(self.ps, _param_refs_from_list, args=(self.hRemote)))
         param_rrefs.extend(_parameter_rrefs(self.transformer.ln_f))
         param_rrefs.extend(_parameter_rrefs(self.lm_head))
 

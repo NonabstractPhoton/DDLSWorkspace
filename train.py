@@ -9,6 +9,8 @@ import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 import torch.multiprocessing as mp
+import torch.distributed.rpc as rpc
+from torch.distributed.optim import DistributedOptimizer
 
 from model import GPTConfig, GPT
     

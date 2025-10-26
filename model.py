@@ -14,7 +14,7 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import torch.distributed.rpc as RRef, rpc
+import torch.distributed.rpc as rpc
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -133,7 +133,7 @@ def forwardBlocks(list_rref, x, gpuDistribution):
 def _parameter_rrefs(module):
     param_rrefs = []
     for param in module.parameters():
-        param_rrefs.append(RRef(param))
+        param_rrefs.append(rpc.RRef(param))
     return param_rrefs
 
 def _param_refs_from_list(list_rref):

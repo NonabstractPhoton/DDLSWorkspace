@@ -320,8 +320,13 @@ def run_trainer(rank, world_size):
 # -----------------------------------------------------------------------------
 # Main Function
 
-rank = int(os.environ['GROUP_RANK'])
-world_size = int(os.environ['WORLD_SIZE'])
+rank = 0
+world_size = 1
+try :
+    rank = int(os.environ['RANK'])
+    world_size = int(os.environ['WORLD_SIZE'])
+except :
+    pass
 print(f"Rank: {rank}, World Size: {world_size}")
 run_worker(rank, world_size)
 print("Training complete.")

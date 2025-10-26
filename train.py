@@ -60,9 +60,6 @@ config_keys = [k for k,v in globals().items() if not k.startswith('_') and isins
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
 
-
-if __name__ == '__main__':
-    main()
 # -----------------------------------------------------------------------------$
 def run_worker(rank, world_size):
     if rank == 1:
@@ -307,8 +304,10 @@ def run_trainer(rank, world_size):
         if iter_num > max_iters:
             break
 
-def main():
-    rank = int(os.environ['GROUP_RANK'])
-    world_size = int(os.environ['WORLD_SIZE'])
-    print(f"Rank: {rank}, World Size: {world_size}")
-    run_worker(rank, world_size)
+# -----------------------------------------------------------------------------
+# Main Function
+
+rank = int(os.environ['GROUP_RANK'])
+world_size = int(os.environ['WORLD_SIZE'])
+print(f"Rank: {rank}, World Size: {world_size}")
+run_worker(rank, world_size)

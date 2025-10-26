@@ -226,7 +226,8 @@ class GPT(nn.Module):
         for block in self.transformer.hLocal:
             x = block(x.to(device=torch.device('cuda',self.gpuSpread[i])))
             i += 1
-        x = rpc.rpc_sync(self.ps, forwardRemoteBlocks, args=(self.hRemote, x, self.gpuSpread[i:]))
+        # send to remote node with tensor moved to CPU for rpc transfer
+        x = rpc.rpc_sync(self.ps, forwardRemoteBlocks, args=(self.hRemote, x.to(device=torch.device('cpu')), self.gpuSpread[i:]))
 
         x = self.transformer.ln_f(x.to(device=torch.device('cuda:0')))
 

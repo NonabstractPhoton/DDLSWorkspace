@@ -14,7 +14,6 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import torch.distributed.rpc as rpc
 
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
@@ -106,9 +105,6 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln_2(x))
         return x
 
-# 
-#   Modifications Begin Here
-#
 @dataclass
 class GPTConfig:
     block_size: int = 1024
@@ -116,57 +112,25 @@ class GPTConfig:
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
-    n_gpus: int = 2 # for model parallelism
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
-def createBlockModules(config, gpuDistribution):
-    return nn.ModuleList([Block(config).to(device=torch.device('cuda',gpu_ord % 4)) for gpu_ord in gpuDistribution])
-
-def forwardRemoteBlocks(list_rref, x, gpuDistribution):
-    j = 0
-    for block in list_rref.to_here(): # to resolve type, the list should already be on the correct worker
-        x = block(x.to(device=torch.device('cuda',gpuDistribution[j])))
-        j += 1
-    return x.to(device=torch.device('cpu')) # rpc backend on supports cpu tensor transfer
-
-def _parameter_rrefs(module):
-    param_rrefs = []
-    for param in module.parameters():
-        param_rrefs.append(rpc.RRef(param))
-    return param_rrefs
-
-def _param_refs_from_list(list_rref):
-    param_rrefs = []
-    for module in list_rref.to_here(): # to resolve type, the list should already be on the correct worker
-        param_rrefs.extend(_parameter_rrefs(module))
-    return param_rrefs
-
 class GPT(nn.Module):
 
-    def __init__(self, config, ps):
+    def __init__(self, config):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config
-        self.gpuSpread = list(map(lambda i: int(i*config.n_gpus/config.n_layer), range(config.n_layer)))
-        local_end = 4*config.n_layer//config.n_gpus
-        self.ps = ps
-        self.hasRemote = (local_end < config.n_layer)
 
         self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd).to(device=torch.device('cuda:0')),
-            wpe = nn.Embedding(config.block_size, config.n_embd).to(device=torch.device('cuda:0')),
-            drop = nn.Dropout(config.dropout).to(device=torch.device('cuda:0')),
-            hLocal = createBlockModules(config, self.gpuSpread[0:local_end]),#Rref to ModuleList
-            ln_f = LayerNorm(config.n_embd, bias=config.bias).to(device=torch.device('cuda:0')),
+            wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wpe = nn.Embedding(config.block_size, config.n_embd),
+            drop = nn.Dropout(config.dropout),
+            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
-        if (self.hasRemote):
-            self.hRemote = rpc.remote(self.ps, createBlockModules, args=(config, self.gpuSpread[local_end:]))   #Rref to ModuleList
-        else:
-            self.hRemote = None
-
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False).to('cuda:0')
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
@@ -182,21 +146,6 @@ class GPT(nn.Module):
 
         # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
-
-    def parameter_rrefs(self):
-        param_rrefs = []
-        param_rrefs.extend(_parameter_rrefs(self.transformer.wte))
-        param_rrefs.extend(_parameter_rrefs(self.transformer.wpe))
-        param_rrefs.extend(_parameter_rrefs(self.transformer.drop))
-        for block in self.transformer.hLocal:
-            param_rrefs.extend(_parameter_rrefs(block))
-
-        if (self.hasRemote):
-            param_rrefs.extend(rpc.rpc_sync(self.ps, _param_refs_from_list, args=(self.hRemote,)))
-        param_rrefs.extend(_parameter_rrefs(self.transformer.ln_f))
-        param_rrefs.extend(_parameter_rrefs(self.lm_head))
-
-        return param_rrefs
 
     def get_num_params(self, non_embedding=True):
         """
@@ -219,24 +168,18 @@ class GPT(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
-        
+        device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=torch.device('cuda:0')) # shape (t)
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
         # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx).to(device=torch.device('cuda:0')) # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos).to(device=torch.device('cuda:0')) # position embeddings of shape (t, n_embd)
+        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
-        i = 0
-        for block in self.transformer.hLocal:
-            x = block(x.to(device=torch.device('cuda',self.gpuSpread[i])))
-            i += 1
-        # send to remote node with tensor moved to CPU for rpc transfer
-        if (self.hasRemote):
-            x = rpc.rpc_sync(self.ps, forwardRemoteBlocks, args=(self.hRemote, x.to(device=torch.device('cpu')), self.gpuSpread[i:]))
-
-        x = self.transformer.ln_f(x.to(device=torch.device('cuda:0')))
+        for block in self.transformer.h:
+            x = block(x)
+        x = self.transformer.ln_f(x)
 
         if targets is not None:
             # if we are given some desired targets also calculate the loss

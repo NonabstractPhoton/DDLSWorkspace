@@ -194,15 +194,29 @@ if block_size < model.config.block_size:
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
 model.to(device)
 
-# TODO
-print(f"number of parameters: {model.get_num_params()/1e6:.2f}M")
-print(model.layers)
-exit()
 
 tp_mesh = init_device_mesh("cuda", (4,))
 layer_tp_plan = {
-
+    "transformer.wte": ColwiseParallel(),
+    "transformer.wpe": ColwiseParallel(),
+    "transformer.drop": RowwiseParallel(),
+    "transformer.ln_f": ColwiseParallel(),
+    "lm_head": RowwiseParallel(),
 }
+
+for i,block in enumerate(model.transformer.h):
+    layer_tp_plan.update({
+        f"transformer.h.{i}.ln_1": RowwiseParallel(),
+        f"transformer.h.{i}.attn.c_attn": ColwiseParallel(),
+        f"transformer.h.{i}.attn.c_proj": RowwiseParallel(),
+        f"transformer.h.{i}.ln_2": RowwiseParallel(),
+        f"transformer.h.{i}.mlp.c_fc": ColwiseParallel(),
+        f"transformer.h.{i}.mlp.c_proj": RowwiseParallel(),
+    })
+parallelize_module(model, tp_mesh, layer_tp_plan)
+print("Model parallelization complete.")
+exit()
+
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))

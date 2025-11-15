@@ -27,7 +27,10 @@ import torch
 from torch.distributed import init_process_group, destroy_process_group
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor.parallel import (
-    PrepareModuleInput, SequenceParallel, ColwiseParallel, RowwiseParallel, parallelize_module, loss_parallel
+    PrepareModuleInput, SequenceParallel, 
+    ColwiseParallel, RowwiseParallel,
+    Shard, Replicate, 
+    parallelize_module, loss_parallel
 )
 
 from model import GPTConfig, GPT
@@ -193,9 +196,17 @@ layer_tp_plan = {
 for i,block in enumerate(model.transformer.h):
     layer_tp_plan.update({
         f"transformer.h.{i}.ln_1": SequenceParallel(),
+        f"transformer.h.{i}.attn": PrepareModuleInput(
+            input_layouts=(Shard(0),None, None),
+            desired_input_layouts=(Replicate(), None, None)
+        ),
         f"transformer.h.{i}.attn.c_attn": ColwiseParallel(use_local_output=False),
-        f"transformer.h.{i}.attn.c_proj": RowwiseParallel(),
+        f"transformer.h.{i}.attn.c_proj": RowwiseParallel(output_layouts=Shard(0)),
         f"transformer.h.{i}.ln_2": SequenceParallel(),
+        f"transformer.h.{i}.mlp": PrepareModuleInput(
+            input_layouts=(Shard(0), None),
+            desired_input_layouts=(Replicate(), None)
+        ),
         f"transformer.h.{i}.mlp.c_fc": ColwiseParallel(),
         f"transformer.h.{i}.mlp.c_proj": RowwiseParallel(),
     })
@@ -204,7 +215,7 @@ model = parallelize_module(model, tp_mesh, layer_tp_plan)
 
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
+scaler = torch.amp.GradScaler('cuda', enabled=(dtype == 'float16'))
 
 # optimizer
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)

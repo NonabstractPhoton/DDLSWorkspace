@@ -26,7 +26,9 @@ import numpy as np
 import torch
 from torch.distributed import init_process_group, destroy_process_group
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel, parallelize_module
+from torch.distributed.tensor.parallel import (
+    PrepareModuleInput, SequenceParallel, ColwiseParallel, RowwiseParallel, parallelize_module, loss_parallel
+)
 
 from model import GPTConfig, GPT
 
@@ -71,8 +73,6 @@ min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchi
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 device = f'cuda:{os.environ["LOCAL_RANK"]}' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
-print('my device is ---')
-print(device)
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
@@ -111,6 +111,7 @@ def get_batch(split):
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+    
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -178,29 +179,28 @@ elif init_from.startswith('gpt2'):
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
-
-
+print(f"{os.environ['LOCAL_RANK']} is on {device}")
+torch.cuda.set_device(device)
 tp_mesh = init_device_mesh("cuda", (4,))
 layer_tp_plan = {
     "transformer.wte": ColwiseParallel(),
     "transformer.wpe": ColwiseParallel(),
-    "transformer.drop": RowwiseParallel(),
-    "transformer.ln_f": ColwiseParallel(),
+    # "transformer.drop": RowwiseParallel(),
+    "transformer.ln_f": SequenceParallel(),
     "lm_head": RowwiseParallel(),
 }
 
 for i,block in enumerate(model.transformer.h):
     layer_tp_plan.update({
-        f"transformer.h.{i}.ln_1": RowwiseParallel(),
-        f"transformer.h.{i}.attn.c_attn": ColwiseParallel(),
+        f"transformer.h.{i}.ln_1": SequenceParallel(),
+        f"transformer.h.{i}.attn.c_attn": ColwiseParallel(use_local_output=False),
         f"transformer.h.{i}.attn.c_proj": RowwiseParallel(),
-        f"transformer.h.{i}.ln_2": RowwiseParallel(),
+        f"transformer.h.{i}.ln_2": SequenceParallel(),
         f"transformer.h.{i}.mlp.c_fc": ColwiseParallel(),
         f"transformer.h.{i}.mlp.c_proj": RowwiseParallel(),
     })
-parallelize_module(model, tp_mesh, layer_tp_plan)
-print("Model parallelization complete.")
-exit()
+
+model = parallelize_module(model, tp_mesh, layer_tp_plan)
 
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
@@ -297,13 +297,14 @@ while True:
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
     for micro_step in range(gradient_accumulation_steps):
-        with ctx:
-            logits, loss = model(X, Y)
-            loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
-        # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
-        # backward pass, with gradient scaling if training in fp16
-        scaler.scale(loss).backward()
+        with loss_parallel():
+            with ctx:
+                logits, loss = model(X, Y)
+                loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+            # immediately async prefetch next batch while model is doing the forward pass on the GPU
+            X, Y = get_batch('train')
+            # backward pass, with gradient scaling if training in fp16
+            scaler.scale(loss).backward()
     # clip the gradient
     if grad_clip != 0.0:
         scaler.unscale_(optimizer)

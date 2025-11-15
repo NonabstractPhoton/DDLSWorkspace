@@ -29,7 +29,6 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor.parallel import (
     PrepareModuleInput, SequenceParallel, 
     ColwiseParallel, RowwiseParallel,
-    Shard, Replicate, 
     parallelize_module, loss_parallel
 )
 

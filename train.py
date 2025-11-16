@@ -186,26 +186,35 @@ print(f"{os.environ['LOCAL_RANK']} is on {device}")
 torch.cuda.set_device(device)
 tp_mesh = init_device_mesh("cuda", (4,))
 tp_plan = {
-    "transformer.wte": ColwiseParallel(),
-    "transformer.wpe": ColwiseParallel(),
+    "transformer.wte": RowwiseParallel(
+        input_layouts=Replicate(),
+        output_layouts=Shard(1)
+    ),
+    "transformer.wpe":RowwiseParallel(
+        input_layouts=Replicate(),
+        output_layouts=Shard(1)
+    ),
     # "transformer.drop": RowwiseParallel(),
     "transformer.ln_f": SequenceParallel(),
-    "lm_head": RowwiseParallel(),
+    "lm_head": ColwiseParallel(
+        input_layouts=Shard(1),
+        output_layouts=Replicate()
+    ),
 }
 
 for i,block in enumerate(model.transformer.h):
     tp_plan.update({
         f"transformer.h.{i}.ln_1": SequenceParallel(),
         f"transformer.h.{i}.attn": PrepareModuleInput(
-            input_layouts=(Shard(1), None, None),
-            desired_input_layouts=(Replicate(), None, None  )
+            input_layouts=(Shard(1),Replicate()),
+            desired_input_layouts=(Replicate(), Replicate())
         ),
         f"transformer.h.{i}.attn.c_attn": ColwiseParallel(use_local_output=False),
         f"transformer.h.{i}.attn.c_proj": RowwiseParallel(output_layouts=Shard(1)),
         f"transformer.h.{i}.ln_2": SequenceParallel(),
         f"transformer.h.{i}.mlp": PrepareModuleInput(
-            input_layouts=(Shard(1), None, None),
-            desired_input_layouts=(Replicate(), None, None)
+            input_layouts=(Shard(1),),
+            desired_input_layouts=(Replicate(),)
         ),
         f"transformer.h.{i}.mlp.c_fc": ColwiseParallel(),
         f"transformer.h.{i}.mlp.c_proj": RowwiseParallel(output_layouts=Shard(1)),

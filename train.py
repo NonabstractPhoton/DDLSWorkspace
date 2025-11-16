@@ -31,6 +31,7 @@ from torch.distributed.tensor.parallel import (
     ColwiseParallel, RowwiseParallel,
     parallelize_module, loss_parallel
 )
+from torch.distributed.tensor.placement_types import Shard, Replicate
 
 from model import GPTConfig, GPT
 

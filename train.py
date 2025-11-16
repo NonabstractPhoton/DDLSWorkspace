@@ -185,7 +185,7 @@ if block_size < model.config.block_size:
 print(f"{os.environ['LOCAL_RANK']} is on {device}")
 torch.cuda.set_device(device)
 tp_mesh = init_device_mesh("cuda", (4,))
-layer_tp_plan = {
+tp_plan = {
     "transformer.wte": ColwiseParallel(),
     "transformer.wpe": ColwiseParallel(),
     # "transformer.drop": RowwiseParallel(),
@@ -194,24 +194,24 @@ layer_tp_plan = {
 }
 
 for i,block in enumerate(model.transformer.h):
-    layer_tp_plan.update({
+    tp_plan.update({
         f"transformer.h.{i}.ln_1": SequenceParallel(),
         f"transformer.h.{i}.attn": PrepareModuleInput(
-            input_layouts=(Shard(0),None, None),
-            desired_input_layouts=(Replicate(), None, None)
+            input_layouts=(Shard(1), None, None),
+            desired_input_layouts=(Replicate(), None, None  )
         ),
         f"transformer.h.{i}.attn.c_attn": ColwiseParallel(use_local_output=False),
-        f"transformer.h.{i}.attn.c_proj": RowwiseParallel(output_layouts=Shard(0)),
+        f"transformer.h.{i}.attn.c_proj": RowwiseParallel(output_layouts=Shard(1)),
         f"transformer.h.{i}.ln_2": SequenceParallel(),
         f"transformer.h.{i}.mlp": PrepareModuleInput(
-            input_layouts=(Shard(0), None),
-            desired_input_layouts=(Replicate(), None)
+            input_layouts=(Shard(1), None, None),
+            desired_input_layouts=(Replicate(), None, None)
         ),
         f"transformer.h.{i}.mlp.c_fc": ColwiseParallel(),
-        f"transformer.h.{i}.mlp.c_proj": RowwiseParallel(),
+        f"transformer.h.{i}.mlp.c_proj": RowwiseParallel(output_layouts=Shard(1)),
     })
 
-model = parallelize_module(model, tp_mesh, layer_tp_plan)
+model = parallelize_module(model, tp_mesh, tp_plan)
 
 
 # initialize a GradScaler. If enabled=False scaler is a no-op

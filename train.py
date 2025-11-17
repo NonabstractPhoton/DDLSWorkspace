@@ -199,7 +199,8 @@ tp_plan = {
     
     "lm_head": ColwiseParallel(
         input_layouts=Shard(1),
-        use_local_output=False,
+        use_local_output=True,
+        output_layouts=Replicate()
     ),
 
 }
@@ -254,9 +255,11 @@ def estimate_loss():
             with ctx:
                 with loss_parallel():
                     logits, loss = model(X, Y)
-            losses[k] = loss.item()
+                    print('attempting continue estimate_loss')
+                    losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
+    print("finished estimate loss")
     return out
 
 # learning rate decay scheduler (cosine with warmup)
@@ -322,14 +325,17 @@ while True:
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
     for micro_step in range(gradient_accumulation_steps):
-        with loss_parallel():
-            with ctx:
+        with ctx:
+            with loss_parallel():
+                print('training step')
                 logits, loss = model(X, Y)
+                print('attempting to backpropagate')
                 loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
-            # immediately async prefetch next batch while model is doing the forward pass on the GPU
-            X, Y = get_batch('train')
-            # backward pass, with gradient scaling if training in fp16
-            scaler.scale(loss).backward()
+                # immediately async prefetch next batch while model is doing the forward pass on the GPU
+                X, Y = get_batch('train')
+                # backward pass, with gradient scaling if training in fp16
+                print('attempting to scale loss and call backward')
+                scaler.scale(loss).backward()
     # step the optimizer and scaler if training in fp16
     scaler.step(optimizer)
     scaler.update()

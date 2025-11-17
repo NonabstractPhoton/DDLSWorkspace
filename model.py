@@ -182,20 +182,20 @@ class GPT(nn.Module):
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
-        print("Idx size:", idx.size())  # Debug print
-        print("Pos size:", pos.size())  # Debug print
+        # print("Idx size:", idx.size())  # Debug print
+        # print("Pos size:", pos.size())  # Debug print
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         print("Tok emb size:", tok_emb.size())  # Debug print
         print("Pos emb size:", pos_emb.size())  # Debug print
         x = tok_emb + pos_emb # broadcast position embeddings to all examples in the batch
-        print("Sum emb size:", x.size())  # Debug print
+        # print("Sum emb size:", x.size())  # Debug print
         x = self.transformer.drop(x)
-        print("Input to transformer blocks size:", x.size())  # Debug print
+        # print("Input to transformer blocks size:", x.size())  # Debug print
         for block in self.transformer.h:
             x = block(x)
-            print("Output of block size:", x.size())  # Debug print
+            # print("Output of block size:", x.size())  # Debug print
         x = self.transformer.ln_f(x)
         print("Output after final layer norm size:", x.size())  # Debug print
         if targets is not None:
@@ -207,7 +207,7 @@ class GPT(nn.Module):
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
             loss = None
-
+        print ('forward pass complete')
         return logits, loss
 
     def crop_block_size(self, block_size):

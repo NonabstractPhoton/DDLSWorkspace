@@ -27,7 +27,7 @@ import torch
 from torch.distributed import init_process_group, destroy_process_group
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor.parallel import (
-    PrepareModuleInput, SequenceParallel, 
+    PrepareModuleInput, SequenceParallel,
     ColwiseParallel, RowwiseParallel,
     parallelize_module, loss_parallel
 )
@@ -115,7 +115,7 @@ def get_batch(split):
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
-    
+
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
@@ -185,44 +185,45 @@ if block_size < model.config.block_size:
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
 tp_mesh = init_device_mesh("cuda", (4,))
 tp_plan = {
-    "transformer.wte": RowwiseParallel(
+    
+    "transformer.wte": ColwiseParallel(
         input_layouts=Replicate(),
-        output_layouts=Shard(1)
+        output_layouts=Shard(1),
     ),
-    "transformer.wpe":RowwiseParallel(
+    "transformer.wpe":ColwiseParallel(
         input_layouts=Replicate(),
-        output_layouts=Shard(0)
+        output_layouts=Shard(0),
     ),
-    "transformer.drop": SequenceParallel(use_local_output=True),
-    "transformer.ln_f": SequenceParallel(use_local_output=False),
+    # "transformer.drop": SequenceParallel(use_local_output=False, sequence_dim=1),
+    # "transformer.ln_f": SequenceParallel(use_local_output=False),
+    
     "lm_head": ColwiseParallel(
         input_layouts=Shard(1),
-        use_local_output=False
+        use_local_output=False,
     ),
+
 }
 
 for i,block in enumerate(model.transformer.h):
     tp_plan.update({
-        f"transformer.h.{i}.ln_1": SequenceParallel(use_local_output=True),
-    
-        f"transformer.h.{i}.attn": PrepareModuleInput(
-            input_layouts=(Shard(1)),
-            desired_input_layouts=(Replicate())
-        ),
-        
-        f"transformer.h.{i}.attn.c_attn": ColwiseParallel(use_local_output=False, output_layouts=Replicate()),
-        f"transformer.h.{i}.attn.c_proj": RowwiseParallel(use_local_output=False, output_layouts=Shard(1)),
-        f"transformer.h.{i}.attn.resid_dropout": SequenceParallel(use_local_output=False),
-        f"transformer.h.{i}.ln_2": SequenceParallel(use_local_output=False),
-        f"transformer.h.{i}.mlp": PrepareModuleInput(
-            input_layouts=(Shard(1),Replicate()),
-            desired_input_layouts=(Replicate(),Replicate())
-        ),
+
+
+        f"transformer.h.{i}.attn.c_attn": ColwiseParallel(
+            use_local_output=False,
+            output_layouts=Replicate(),
+            # input_layouts=Shard(1),
+            # output_layouts=Replicate()
+            ),
+        f"transformer.h.{i}.attn.c_proj": RowwiseParallel(
+            use_local_output=True,
+            # input_layouts=Shard(1)
+            ),
         f"transformer.h.{i}.mlp.c_fc": ColwiseParallel(),
-        f"transformer.h.{i}.mlp.c_proj": RowwiseParallel(output_layouts=Shard(1)),
+        f"transformer.h.{i}.mlp.c_proj": RowwiseParallel(),
     })
 
 model = parallelize_module(model, tp_mesh, tp_plan)
+model.to(device)
 
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
@@ -316,7 +317,7 @@ while True:
                 print(f"saving checkpoint to {out_dir}")
                 torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
     if iter_num == 0 and eval_only:
-        break 
+        break
 
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
@@ -329,10 +330,6 @@ while True:
             X, Y = get_batch('train')
             # backward pass, with gradient scaling if training in fp16
             scaler.scale(loss).backward()
-    # clip the gradient
-    if grad_clip != 0.0:
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     # step the optimizer and scaler if training in fp16
     scaler.step(optimizer)
     scaler.update()

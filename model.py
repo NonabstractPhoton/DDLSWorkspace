@@ -103,12 +103,12 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x):
-        print("Input to Block size:", x.size())  # Debug print
+        print("Input to Block size:", x.size(   ))  # Debug print
         x = self.ln_1(x)
         print("After ln_1 size:", x.size())  # Debug print
         x = self.attn(x)
         print("After attn size:", x.size())  # Debug print
-        x = x + self.ln_2(x)
+        x = self.ln_2(x)
         print("After ln_2 size:", x.size())  # Debug print
         x = self.mlp(x)
         print("After mlp size:", x.size())  # Debug print

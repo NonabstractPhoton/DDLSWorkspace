@@ -38,6 +38,7 @@ from model import GPTConfig, GPT
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
+debug = False
 out_dir = 'out'
 eval_interval = 2000
 log_interval = 1
@@ -252,16 +253,19 @@ def estimate_loss():
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
-            print("starting estimate_loss forward pass")
+            if debug:
+                print("starting estimate_loss forward pass")
             with ctx:
                 with loss_parallel():
                     logits, loss = model(X, Y)
-                    print('attempting continue estimate_loss')
-                    print(loss)
+                    if (debug):
+                        print('attempting continue estimate_loss')
+                        print(loss)
                     losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
-    print("finished estimate loss")
+    if (debug):
+        print("finished estimate loss")
     return out
 
 # learning rate decay scheduler (cosine with warmup)
@@ -329,14 +333,17 @@ while True:
     for micro_step in range(gradient_accumulation_steps):
         with ctx:
             with loss_parallel():
-                print('training step')
+                if (debug):
+                    print('training step')
                 logits, loss = model(X, Y)
-                print('attempting to backpropagate')
+                if debug:
+                    print('attempting to backpropagate')
                 loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
                 X, Y = get_batch('train')
                 # backward pass, with gradient scaling if training in fp16
-                print('attempting to scale loss and call backward')
+                if debug:
+                    print('attempting to scale loss and call backward')
                 scaler.scale(loss).backward()
     # step the optimizer and scaler if training in fp16
     scaler.step(optimizer)

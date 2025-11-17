@@ -252,10 +252,12 @@ def estimate_loss():
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = get_batch(split)
+            print("starting estimate_loss forward pass")
             with ctx:
                 with loss_parallel():
                     logits, loss = model(X, Y)
                     print('attempting continue estimate_loss')
+                    print(loss)
                     losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -295,7 +297,7 @@ while True:
         param_group['lr'] = lr
 
     # evaluate the loss on train/val sets and write checkpoints
-    if iter_num % eval_interval == 0 and master_process:
+    if iter_num % eval_interval == 0:
         losses = estimate_loss()
         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         if wandb_log:

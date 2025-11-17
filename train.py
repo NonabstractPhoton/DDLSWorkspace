@@ -75,7 +75,8 @@ min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchi
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
-device = f'cuda:{os.environ["LOCAL_RANK"]}' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+device = f'cuda:{os.environ["LOCAL_RANK"]}'
+torch.cuda.set_device(device)
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
@@ -182,8 +183,6 @@ elif init_from.startswith('gpt2'):
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
-print(f"{os.environ['LOCAL_RANK']} is on {device}")
-torch.cuda.set_device(device)
 tp_mesh = init_device_mesh("cuda", (4,))
 tp_plan = {
     "transformer.wte": RowwiseParallel(
@@ -192,29 +191,32 @@ tp_plan = {
     ),
     "transformer.wpe":RowwiseParallel(
         input_layouts=Replicate(),
-        output_layouts=Shard(1)
+        output_layouts=Shard(0)
     ),
-    # "transformer.drop": RowwiseParallel(),
-    "transformer.ln_f": SequenceParallel(),
+    "transformer.drop": SequenceParallel(use_local_output=True),
+    "transformer.ln_f": SequenceParallel(use_local_output=False),
     "lm_head": ColwiseParallel(
         input_layouts=Shard(1),
-        output_layouts=Replicate()
+        use_local_output=False
     ),
 }
 
 for i,block in enumerate(model.transformer.h):
     tp_plan.update({
-        f"transformer.h.{i}.ln_1": SequenceParallel(),
+        f"transformer.h.{i}.ln_1": SequenceParallel(use_local_output=True),
+    
         f"transformer.h.{i}.attn": PrepareModuleInput(
-            input_layouts=(Shard(1),Replicate()),
-            desired_input_layouts=(Replicate(), Replicate())
+            input_layouts=(Shard(1)),
+            desired_input_layouts=(Replicate())
         ),
-        f"transformer.h.{i}.attn.c_attn": ColwiseParallel(use_local_output=False),
-        f"transformer.h.{i}.attn.c_proj": RowwiseParallel(output_layouts=Shard(1)),
-        f"transformer.h.{i}.ln_2": SequenceParallel(),
+        
+        f"transformer.h.{i}.attn.c_attn": ColwiseParallel(use_local_output=False, output_layouts=Replicate()),
+        f"transformer.h.{i}.attn.c_proj": RowwiseParallel(use_local_output=False, output_layouts=Shard(1)),
+        f"transformer.h.{i}.attn.resid_dropout": SequenceParallel(use_local_output=False),
+        f"transformer.h.{i}.ln_2": SequenceParallel(use_local_output=False),
         f"transformer.h.{i}.mlp": PrepareModuleInput(
-            input_layouts=(Shard(1),),
-            desired_input_layouts=(Replicate(),)
+            input_layouts=(Shard(1),Replicate()),
+            desired_input_layouts=(Replicate(),Replicate())
         ),
         f"transformer.h.{i}.mlp.c_fc": ColwiseParallel(),
         f"transformer.h.{i}.mlp.c_proj": RowwiseParallel(output_layouts=Shard(1)),
@@ -233,7 +235,8 @@ if init_from == 'resume':
 checkpoint = None # free up memory
 
 # compile the model
-if compile:
+# TODO REENABLE
+if compile and False:
     print("compiling the model... (takes a ~minute)")
     unoptimized_model = model
     model = torch.compile(model) # requires PyTorch 2.0
@@ -248,7 +251,8 @@ def estimate_loss():
         for k in range(eval_iters):
             X, Y = get_batch(split)
             with ctx:
-                logits, loss = model(X, Y)
+                with loss_parallel():
+                    logits, loss = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()

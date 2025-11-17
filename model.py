@@ -50,10 +50,12 @@ class CausalSelfAttention(nn.Module):
                                         .view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x):
+        print("Input to CausalSelfAttention size:", x.size())  # Debug print
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
+        print("c_attn and qkv split suceeded")
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
@@ -101,8 +103,15 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        print("Input to Block size:", x.size())  # Debug print
+        x = self.ln_1(x)
+        print("After ln_1 size:", x.size())  # Debug print
+        x = self.attn(x)
+        print("After attn size:", x.size())  # Debug print
+        x = x + self.ln_2(x)
+        print("After ln_2 size:", x.size())  # Debug print
+        x = self.mlp(x)
+        print("After mlp size:", x.size())  # Debug print
         return x
 
 @dataclass
@@ -173,17 +182,26 @@ class GPT(nn.Module):
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
+        print("Idx size:", idx.size())  # Debug print
+        print("Pos size:", pos.size())  # Debug print
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        print("Tok emb size:", tok_emb.size())  # Debug print
+        print("Pos emb size:", pos_emb.size())  # Debug print
+        x = tok_emb + pos_emb # broadcast position embeddings to all examples in the batch
+        print("Sum emb size:", x.size())  # Debug print
+        x = self.transformer.drop(x)
+        print("Input to transformer blocks size:", x.size())  # Debug print
         for block in self.transformer.h:
             x = block(x)
+            print("Output of block size:", x.size())  # Debug print
         x = self.transformer.ln_f(x)
-
+        print("Output after final layer norm size:", x.size())  # Debug print
         if targets is not None:
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
+            print("Logits size:", logits.size())  # Debug print
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position

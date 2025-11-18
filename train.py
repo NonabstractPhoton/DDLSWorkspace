@@ -32,7 +32,8 @@ from torch.distributed.tensor.parallel import (
     parallelize_module, loss_parallel
 )
 from torch.distributed.tensor.placement_types import Shard, Replicate
-
+from torch.distributed.tensor.experimental import implicit_replication
+from torch.distributed.fsdp import fully_shard
 from model import GPTConfig, GPT
 
 # -----------------------------------------------------------------------------
@@ -78,6 +79,7 @@ backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
 device = f'cuda:{os.environ["LOCAL_RANK"]}'
 torch.cuda.set_device(device)
+torch.cuda.empty_cache()
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = True # use PyTorch 2.0 to compile the model to be faster
 # -----------------------------------------------------------------------------
@@ -184,19 +186,21 @@ elif init_from.startswith('gpt2'):
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
-tp_mesh = init_device_mesh("cuda", (4,))
+mesh2d = init_device_mesh("cuda", (2,4),mesh_dim_names=("dp", "tp"))
+tp_mesh = mesh2d["tp"]
+dp_mesh = mesh2d["dp"]
 tp_plan = {
     
-    "transformer.wte": ColwiseParallel(
+    "transformer.wte": RowwiseParallel(
         input_layouts=Replicate(),
         output_layouts=Shard(1),
     ),
-    "transformer.wpe":ColwiseParallel(
+    "transformer.wpe":RowwiseParallel(
         input_layouts=Replicate(),
         output_layouts=Shard(0),
     ),
     # "transformer.drop": SequenceParallel(use_local_output=False, sequence_dim=1),
-    # "transformer.ln_f": SequenceParallel(use_local_output=False),
+    # "transformer.ln_f": SequenceParallel(use_local_output=True, sequence_dim=1),
     
     "lm_head": ColwiseParallel(
         input_layouts=Shard(1),
@@ -209,29 +213,34 @@ tp_plan = {
 for i,block in enumerate(model.transformer.h):
     tp_plan.update({
 
+        # f"transformer.h.{i}.ln_1": SequenceParallel(use_local_output=True, sequence_dim=1),
 
         f"transformer.h.{i}.attn.c_attn": ColwiseParallel(
-            use_local_output=False,
+            use_local_output=False, 
             output_layouts=Replicate(),
             # input_layouts=Shard(1),
             # output_layouts=Replicate()
             ),
+        # f"transformer.h.{i}.attn.attn_dropout": SequenceParallel(),
         f"transformer.h.{i}.attn.c_proj": RowwiseParallel(
             use_local_output=True,
             # input_layouts=Shard(1)
             ),
+        # f"transformer.h.{i}.attn.resid_dropout": SequenceParallel(),
+        # f"transformer.h.{i}.ln_2": SequenceParallel(use_local_output=True, sequence_dim=1),
         f"transformer.h.{i}.mlp.c_fc": ColwiseParallel(),
         f"transformer.h.{i}.mlp.c_proj": RowwiseParallel(),
     })
 
 model = parallelize_module(model, tp_mesh, tp_plan)
-model.to(device)
+model = fully_shard(model, mesh=dp_mesh)
 
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.amp.GradScaler('cuda', enabled=(dtype == 'float16'))
 
 # optimizer
+
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
 if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
@@ -333,23 +342,23 @@ while True:
     for micro_step in range(gradient_accumulation_steps):
         with ctx:
             with loss_parallel():
-                if (debug):
-                    print('training step')
                 logits, loss = model(X, Y)
-                if debug:
-                    print('attempting to backpropagate')
                 loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
                 X, Y = get_batch('train')
-                # backward pass, with gradient scaling if training in fp16
-                if debug:
-                    print('attempting to scale loss and call backward')
+                # backward pass, with gradient scaling if training in f
                 scaler.scale(loss).backward()
+                # loss.backward()
     # step the optimizer and scaler if training in fp16
-    scaler.step(optimizer)
-    scaler.update()
-    # flush the gradients as soon as we can, no need for this memory anymore
-    optimizer.zero_grad(set_to_none=True)
+    with implicit_replication():
+        scaler.unscale_(optimizer)
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        scaler.step(optimizer)
+        scaler.update()
+
+        # optimizer.step()
+        # flush the gradients as soon as we can, no need for this memory anymore
+        optimizer.zero_grad(set_to_none=True)
 
     # timing and logging
     t1 = time.time()

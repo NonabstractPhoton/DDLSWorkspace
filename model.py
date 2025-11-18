@@ -107,20 +107,8 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x):
-        if debug:
-            print("Input to Block size:", x.size())  # Debug print
-        x = self.ln_1(x)
-        if debug:
-            print("After ln_1 size:", x.size())  # Debug print
-        x = self.attn(x)
-        if debug:
-            print("After attn size:", x.size())  # Debug print
-        x = self.ln_2(x)
-        if debug:
-            print("After ln_2 size:", x.size())  # Debug print
-        x = self.mlp(x)
-        if debug:
-            print("After mlp size:", x.size())  # Debug print
+        x = self.attn(self.ln_1(x))
+        x = self.mlp(self.ln_2(x))
         return x
 
 @dataclass
@@ -196,9 +184,7 @@ class GPT(nn.Module):
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        if debug:
-            print("Tok emb size:", tok_emb.size())  # Debug print
-            print("Pos emb size:", pos_emb.size())  # Debug print
+
         x = tok_emb + pos_emb # broadcast position embeddings to all examples in the batch
         # if debug:
         #     print("Sum emb size:", x.size())  # Debug print
@@ -209,20 +195,14 @@ class GPT(nn.Module):
             x = block(x)
             # print("Output of block size:", x.size())  # Debug print
         x = self.transformer.ln_f(x)
-        if debug:
-            print("Output after final layer norm size:", x.size())  # Debug print
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
-            if debug:
-                print("Logits size:", logits.size())  # Debug print
+            logits = self.lm_head(x)  # Debug print
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
-            loss = None
-        if debug:
-            print("Final logits size:", logits.size())  # Debug print
+            loss = None # Debug print
         return logits, loss
 
     def crop_block_size(self, block_size):
@@ -313,6 +293,7 @@ class GPT(nn.Module):
         # Create AdamW optimizer and use the fused version if it is available
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == 'cuda'
+        use_fused = False
         extra_args = dict(fused=True) if use_fused else dict()
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
         print(f"using fused AdamW: {use_fused}")

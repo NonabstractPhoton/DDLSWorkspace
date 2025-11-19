@@ -234,7 +234,7 @@ for i,block in enumerate(model.transformer.h):
 
 model = parallelize_module(model, tp_mesh, tp_plan)
 model = fully_shard(model, mesh=dp_mesh)
-
+print(f"hello from Rank: {os.environ['RANK']}, Local Rank: {os.environ['LOCAL_RANK']}, proc id {os.environ['SLURM_PROCID']}")
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
 scaler = torch.amp.GradScaler('cuda', enabled=(dtype == 'float16'))

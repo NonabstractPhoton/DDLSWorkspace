@@ -213,7 +213,7 @@ tp_plan = {
 for i,block in enumerate(model.transformer.h):
     tp_plan.update({
 
-        # f"transformer.h.{i}.ln_1": SequenceParallel(use_local_output=True, sequence_dim=1),
+        # f"transformer.h.{i}.ln_1": SequenceParallel(use_local_output=False, sequence_dim=1),
 
         f"transformer.h.{i}.attn.c_attn": ColwiseParallel(
             use_local_output=False, 
@@ -240,8 +240,8 @@ print(f"hello from Rank: {os.environ['RANK']}, Local Rank: {os.environ['LOCAL_RA
 scaler = torch.amp.GradScaler('cuda', enabled=(dtype == 'float16'))
 
 # optimizer
-
 optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+# optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, betas=(beta1, beta2), weight_decay=weight_decay)
 if init_from == 'resume':
     optimizer.load_state_dict(checkpoint['optimizer'])
 checkpoint = None # free up memory

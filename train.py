@@ -141,7 +141,7 @@ if os.path.exists(meta_path):
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
-                  bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
+                bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -186,7 +186,7 @@ elif init_from.startswith('gpt2'):
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
     model_args['block_size'] = block_size # so that the checkpoint will have the right value
-mesh2d = init_device_mesh("cuda", (2,4),mesh_dim_names=("dp", "tp"))
+mesh2d = init_device_mesh("cuda", (n_gpus//4,4),mesh_dim_names=("dp", "tp"))
 tp_mesh = mesh2d["tp"]
 dp_mesh = mesh2d["dp"]
 tp_plan = {
@@ -199,8 +199,8 @@ tp_plan = {
         input_layouts=Replicate(),
         output_layouts=Shard(0),
     ),
-    # "transformer.drop": SequenceParallel(use_local_output=False, sequence_dim=1),
-    # "transformer.ln_f": SequenceParallel(use_local_output=True, sequence_dim=1),
+    "transformer.drop": SequenceParallel(use_local_output=False, sequence_dim=1),
+    "transformer.ln_f": SequenceParallel(use_local_output=False, sequence_dim=1),
     
     "lm_head": ColwiseParallel(
         input_layouts=Shard(1),
@@ -213,27 +213,30 @@ tp_plan = {
 for i,block in enumerate(model.transformer.h):
     tp_plan.update({
 
-        # f"transformer.h.{i}.ln_1": SequenceParallel(use_local_output=False, sequence_dim=1),
+        f"transformer.h.{i}.ln_1": SequenceParallel(use_local_output=False, sequence_dim=1),
 
         f"transformer.h.{i}.attn.c_attn": ColwiseParallel(
             use_local_output=False, 
             output_layouts=Replicate(),
-            # input_layouts=Shard(1),
+            input_layouts=Shard(1),
             # output_layouts=Replicate()
             ),
-        # f"transformer.h.{i}.attn.attn_dropout": SequenceParallel(),
+        f"transformer.h.{i}.attn.attn_dropout": SequenceParallel(),
         f"transformer.h.{i}.attn.c_proj": RowwiseParallel(
             use_local_output=True,
-            # input_layouts=Shard(1)
+            input_layouts=Shard(1),
+            output_layouts=Shard(1)  
             ),
-        # f"transformer.h.{i}.attn.resid_dropout": SequenceParallel(),
-        # f"transformer.h.{i}.ln_2": SequenceParallel(use_local_output=True, sequence_dim=1),
-        f"transformer.h.{i}.mlp.c_fc": ColwiseParallel(),
-        f"transformer.h.{i}.mlp.c_proj": RowwiseParallel(),
+        f"transformer.h.{i}.attn.resid_dropout": SequenceParallel(sequence_dim=1),
+        f"transformer.h.{i}.ln_2": SequenceParallel(use_local_output=False, sequence_dim=1),
+        f"transformer.h.{i}.mlp.c_fc": ColwiseParallel(input_layouts=Shard(1),output_layouts=Shard(1)),
+        f"transformer.h.{i}.mlp.c_proj": RowwiseParallel(input_layouts=Shard(1),output_layouts=Shard(1)),
+        f"transformer.h.{i}.mlp.dropout": SequenceParallel(use_local_output=False, sequence_dim=1),
     })
 
 model = parallelize_module(model, tp_mesh, tp_plan)
-model = fully_shard(model, mesh=dp_mesh)
+if (n_gpus > 4):
+    model = fully_shard(model, mesh=dp_mesh)
 print(f"hello from Rank: {os.environ['RANK']}, Local Rank: {os.environ['LOCAL_RANK']}, proc id {os.environ['SLURM_PROCID']}")
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
@@ -339,16 +342,15 @@ while True:
 
     # forward backward update, with optional gradient accumulation to simulate larger batch size
     # and using the GradScaler if data type is float16
-    for micro_step in range(gradient_accumulation_steps):
-        with ctx:
-            with loss_parallel():
-                logits, loss = model(X, Y)
-                loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
-                # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                X, Y = get_batch('train')
-                # backward pass, with gradient scaling if training in f
-                scaler.scale(loss).backward()
-                # loss.backward()
+    with ctx:
+        with loss_parallel():
+            logits, loss = model(X, Y)
+            # loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
+            # immediately async prefetch next batch while model is doing the forward pass on the GPU
+            X, Y = get_batch('train')
+            # backward pass, with gradient scaling if training in f
+            scaler.scale(loss).backward()
+            # loss.backward()
     # step the optimizer and scaler if training in fp16
     with implicit_replication():
         scaler.unscale_(optimizer)

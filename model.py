@@ -15,8 +15,6 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-debug = False
-
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
@@ -52,14 +50,10 @@ class CausalSelfAttention(nn.Module):
                                         .view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x):
-        if debug:
-            print("Input to CausalSelfAttention size:", x.size())  # Debug print
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
-        if debug:
-            print("c_attn and qkv split suceeded")
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
@@ -107,8 +101,8 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x):
-        x = self.attn(self.ln_1(x))
-        x = self.mlp(self.ln_2(x))
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
         return x
 
 @dataclass
@@ -118,6 +112,7 @@ class GPTConfig:
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
+    n_gpus: int = 4
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
 
@@ -179,30 +174,23 @@ class GPT(nn.Module):
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
-        # print("Idx size:", idx.size())  # Debug print
-        # print("Pos size:", pos.size())  # Debug print
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-
-        x = tok_emb + pos_emb # broadcast position embeddings to all examples in the batch
-        # if debug:
-        #     print("Sum emb size:", x.size())  # Debug print
-        x = self.transformer.drop(x)
-        # if debug:
-        #     print("Input to transformer blocks size:", x.size())  # Debug print
+        x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
             x = block(x)
-            # print("Output of block size:", x.size())  # Debug print
         x = self.transformer.ln_f(x)
+
         if targets is not None:
             # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)  # Debug print
+            logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
-            loss = None # Debug print
+            loss = None
+
         return logits, loss
 
     def crop_block_size(self, block_size):
@@ -293,7 +281,6 @@ class GPT(nn.Module):
         # Create AdamW optimizer and use the fused version if it is available
         fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
         use_fused = fused_available and device_type == 'cuda'
-        use_fused = False
         extra_args = dict(fused=True) if use_fused else dict()
         optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
         print(f"using fused AdamW: {use_fused}")
@@ -341,4 +328,4 @@ class GPT(nn.Module):
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
 
-        return idx  
+        return idx
